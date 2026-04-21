@@ -1,0 +1,1262 @@
+/**
+ * ============================================================================
+ * CLEARPATH SBA - INSTITUTIONAL UI FRAMEWORK
+ * ============================================================================
+ * Architecture: 
+ * - Grid: Strict 8pt spacing system (Tailwind multiples of 2, 4, 6, 8, 12, 16).
+ * - Typography: Merriweather (Institutional Headings) + Inter (Data/UI). 
+ * - Alignment: ALL currency/financial data uses `tabular-nums font-sans` to ensure perfect column alignment without "dashed zeros".
+ * - Palette: Clinical Slate-50 (Canvas), White (Cards), Slate-900 (Brand Primary), Emerald-600 (Action).
+ * - Interactions: Cell-level copy-to-clipboard, CSV extraction, stateful document checklists.
+ * - GTM Integration: Multi-audience positioning built natively into the Overview experience.
+ * - Underwriting Edge: FY26 Manufacturer Waiver calculator logic included.
+ */
+
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Shield, FileText, LayoutDashboard, Activity, AlertCircle, 
+  Download, Clock, CheckCircle2, ChevronRight, Menu, X, 
+  ArrowRight, Layers, CheckSquare, Info, MessageSquare, 
+  Landmark, Calculator, BadgeCheck, Loader2, Copy, Check,
+  Factory, Briefcase, Users
+} from 'lucide-react';
+
+// ============================================================================
+// AI API HELPER (With Exponential Backoff)
+// ============================================================================
+const apiKey = ""; // Execution environment provides the key at runtime
+
+async function fetchAutomatedContent(prompt, systemInstruction = "", jsonSchema = null) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: { parts: [{ text: systemInstruction }] },
+  };
+
+  if (jsonSchema) {
+    payload.generationConfig = {
+      responseMimeType: "application/json",
+      responseSchema: jsonSchema
+    };
+  }
+
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  
+  for (let i = 0; i <= delays.length; i++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+      
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!text) throw new Error("Invalid response format from service");
+      
+      return jsonSchema ? JSON.parse(text) : text;
+    } catch (error) {
+      if (i === delays.length) {
+        console.error("API failed after maximum retries:", error);
+        throw new Error("System experiencing high traffic. Please try again.");
+      }
+      await new Promise(resolve => setTimeout(resolve, delays[i]));
+    }
+  }
+}
+
+// ============================================================================
+// SHARED COMPONENTS
+// ============================================================================
+
+const AdUnit = ({ className = "h-[90px]", label = "Advertisement Space" }) => (
+  <div className={`bg-slate-100 border border-slate-200 flex flex-col items-center justify-center text-slate-400 rounded-lg relative overflow-hidden w-full ${className}`}>
+    <span className="text-[10px] font-bold uppercase tracking-widest absolute top-4 left-4 opacity-40">Sponsored Placement</span>
+    <span className="text-sm font-medium opacity-50">{label}</span>
+  </div>
+);
+
+// ============================================================================
+// DATA: SBA CONSTANTS & QUESTIONS
+// ============================================================================
+const PROGRAMS = [
+  { id: "7a_25", label: "7(a) Real Estate", maxY: 25, note: "Up to 25 years · Prime + 2.75%" },
+  { id: "7a_10", label: "7(a) Equipment / Working Capital", maxY: 10, note: "Up to 10 years · Prime + 2.75%" },
+  { id: "express", label: "SBA Express", maxY: 10, note: "Up to 10 years · Prime + 4.5%" },
+  { id: "504", label: "SBA 504 (CDC portion)", maxY: 20, note: "Up to 20 years · Fixed ~6–7%" },
+];
+
+const SCREENER_QUESTIONS = [
+  { id:"biz_age", q:"How long has your business been operating?", hint:"SBA lenders generally require a minimum of 2 years of operational history.", options:[{label:"Less than 1 year",value:"under1",flag:"red"},{label:"1–2 years",value:"1to2",flag:"yellow"},{label:"2–5 years",value:"2to5",flag:"none"},{label:"Over 5 years",value:"over5",flag:"none"}]},
+  { id:"biz_type", q:"What is your primary industry classification?", options:[{label:"Restaurant / Food Service",value:"food"},{label:"Retail Trade",value:"retail"},{label:"Professional Services",value:"service"},{label:"Passive Real Estate Investment",value:"realestate",flag:"red"},{label:"Restricted (Gambling, Adult, Firearms)",value:"restricted",flag:"red"},{label:"Other Eligible Commercial Entity",value:"other"}]},
+  { id:"credit", q:"What is the primary guarantor's FICO credit score?", hint:"A FICO score of 650 or higher is required to pass standard pre-qualification.", options:[{label:"Below 580",value:"poor",flag:"red"},{label:"580–619",value:"fair",flag:"red"},{label:"620–649",value:"neargood",flag:"yellow"},{label:"650–699",value:"good"},{label:"700 or above",value:"excellent"}]},
+  { id:"purpose", q:"What is the designated use of loan proceeds?", options:[{label:"Working Capital / Operational Expenses",value:"working_capital"},{label:"Equipment or Machinery Acquisition",value:"equipment"},{label:"Commercial Real Estate Purchase",value:"realestate_purchase"},{label:"Refinancing Existing Commercial Debt",value:"refinance",flag:"yellow"},{label:"Startup Funding (Pre-Revenue)",value:"startup",flag:"red"}]},
+  { id:"federal_default", q:"Is there any history of default on federal obligations?", options:[{label:"No Prior Defaults",value:"no"},{label:"Yes, Fully Cured/Resolved",value:"resolved",flag:"yellow"},{label:"Yes, Currently Unresolved",value:"unresolved",flag:"red"}]}
+];
+
+// ============================================================================
+// MAIN APP SHELL
+// ============================================================================
+export default function App() {
+  const [page, setPage] = useState('home');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }, [page]);
+
+  const nav = (p) => {
+    setPage(p);
+    setMobileMenuOpen(false);
+  };
+
+  const NavLink = ({ id, label }) => (
+    <button
+      onClick={() => nav(id)}
+      className={`text-sm font-medium transition-colors px-4 py-2 rounded-lg ${
+        page === id 
+          ? 'text-white bg-slate-800' 
+          : 'text-slate-300 hover:text-white hover:bg-slate-800'
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-emerald-100 selection:text-slate-900">
+      <style dangerouslySetInnerHTML={{__html: `
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Merriweather:wght@400;700;900&display=swap');
+        .font-serif { font-family: 'Merriweather', Georgia, serif; }
+        .font-sans { font-family: 'Inter', system-ui, sans-serif; }
+
+        /* Precision slider styling for Deal Desk Terminal */
+        input[type=range] {
+          -webkit-appearance: none;
+          width: 100%;
+          background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          height: 18px;
+          width: 18px;
+          border-radius: 50%;
+          background: #0f172a;
+          cursor: pointer;
+          margin-top: -7px;
+          border: 2px solid #ffffff;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: #cbd5e1;
+          border-radius: 2px;
+        }
+        input[type=range]:focus {
+          outline: none;
+        }
+      `}} />
+
+      {/* Header */}
+      <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-4 cursor-pointer" onClick={() => nav('home')}>
+            <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center border border-slate-200 shadow-sm">
+              <Landmark className="w-5 h-5 text-slate-900" />
+            </div>
+            <span className="text-xl font-bold tracking-tight text-white font-serif">
+              ClearPath SBA
+            </span>
+          </div>
+          
+          {/* Desktop Nav */}
+          <nav className="hidden md:flex items-center gap-2">
+            <NavLink id="home" label="Overview" />
+            <NavLink id="calculator" label="Pricing & Structuring" />
+            <NavLink id="screener" label="Eligibility Engine" />
+            <NavLink id="checklist" label="Compliance Matrix" />
+            <NavLink id="compare" label="Program Matrix" />
+          </nav>
+
+          <div className="flex items-center gap-4">
+            <div className="hidden md:flex items-center gap-2 px-4 py-2 bg-slate-800 rounded-lg text-slate-100 text-xs font-bold tracking-wider uppercase border border-slate-700">
+              100% Free Software
+            </div>
+            <button 
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="md:hidden p-2 text-slate-300 hover:text-white rounded-lg transition-colors"
+            >
+              {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Mobile Nav */}
+        {mobileMenuOpen && (
+          <div className="md:hidden border-t border-slate-800 bg-slate-900 px-6 py-4 flex flex-col gap-2">
+            <NavLink id="home" label="Overview" />
+            <NavLink id="calculator" label="Pricing & Structuring" />
+            <NavLink id="screener" label="Eligibility Engine" />
+            <NavLink id="checklist" label="Compliance Matrix" />
+            <NavLink id="compare" label="Program Matrix" />
+          </div>
+        )}
+      </header>
+
+      {/* Trust Bar */}
+      <div className="bg-white border-b border-slate-200 py-4 text-xs font-bold text-slate-600 uppercase tracking-wide flex flex-wrap justify-center gap-8 md:gap-16 shadow-sm">
+        <span className="flex items-center gap-2"><BadgeCheck className="w-4 h-4 text-emerald-600" /> Free Financial Software</span>
+        <span className="flex items-center gap-2"><Shield className="w-4 h-4 text-slate-900" /> Compliant with SBA SOP 50 10 7</span>
+        <span className="flex items-center gap-2"><Calculator className="w-4 h-4 text-slate-900" /> Objective Data Modeling</span>
+      </div>
+
+      {/* Main Content Area */}
+      <main className="max-w-7xl mx-auto px-6 py-12 relative z-10 min-h-[70vh]">
+        <div key={page} className="w-full transition-opacity duration-200 ease-in-out">
+          {page === 'home' && <Home nav={nav} />}
+          {page === 'calculator' && <CalculatorPitch />}
+          {page === 'screener' && <Screener />}
+          {page === 'checklist' && <Checklist />}
+          {page === 'compare' && <Compare />}
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="bg-white border-t border-slate-200 py-12 mt-auto">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-col lg:flex-row justify-between items-start gap-12 border-b border-slate-200 pb-12 mb-8">
+            <div className="max-w-lg">
+              <div className="flex items-center gap-3 mb-6">
+                <Landmark className="w-6 h-6 text-slate-900" />
+                <span className="text-2xl font-bold text-slate-900 font-serif">ClearPath SBA</span>
+              </div>
+              <p className="text-sm text-slate-600 leading-relaxed font-sans">
+                ClearPath SBA provides free software tools, eligibility screeners, and automated deal structuring calculators built for commercial brokers, lenders, CPAs, and equipment vendors.
+              </p>
+            </div>
+            
+            <div className="w-full lg:w-auto flex-1 max-w-2xl">
+              <AdUnit className="w-full h-[90px]" label="Standard Footer Placement (728x90)" />
+            </div>
+          </div>
+          
+          <div className="text-xs text-slate-500 space-y-4 max-w-4xl font-sans">
+            <p className="font-bold text-slate-900 uppercase tracking-wider">Legal Disclaimer & Terms of Use</p>
+            <p className="leading-relaxed">
+              Clearpathsbaloan.com is an independent educational and software platform. <strong>We are NOT a bank, lender, or financial institution.</strong> We do not issue loans, make credit decisions, or guarantee funding. All calculations, matrices, and automated documents are for informational and structural planning purposes only. SBA guidelines are subject to change; always verify directly with an authorized SBA Preferred Lender.
+            </p>
+            <p className="pt-4 text-slate-400">&copy; {new Date().getFullYear()} ClearPath SBA Tools. All rights reserved.</p>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+// ============================================================================
+// PAGE: HOME / DASHBOARD
+// ============================================================================
+function Home({ nav }) {
+  const TOOLS = [
+    { id: "calculator", title: "Pricing & Structuring", desc: "Calculate exact amortizations, model FY26 fee waivers, and draft client-ready proposals.", icon: Activity },
+    { id: "screener", title: "Eligibility Engine", desc: "Process applicants through strict SBA qualification matrices prior to formal underwriting.", icon: Shield },
+    { id: "checklist", title: "Compliance Matrix", desc: "Generate compliant, entity-specific document requirement lists with detailed guidance.", icon: CheckSquare },
+    { id: "compare", title: "Program Matrix", desc: "Compare capital limits, rates, and terms across 7(a), 504, and Express product lines.", icon: Layers },
+  ];
+
+  const GTM_AUDIENCES = [
+    { title: "Direct-to-Borrower", persona: "Manufacturing CEOs & Founders", desc: "Don't leave government money on the table. Calculate your FY26 SBA Fee Exemption instantly and demystify your commercial debt.", icon: Factory },
+    { title: "Bankers & Lenders", persona: "Commercial Loan Officers", desc: "The 30-second Deal Desk. Generate pristine SBA Term Sheets and copy amortization data before competitors even log into their intranet.", icon: Briefcase },
+    { title: "Strategic Advisors", persona: "CPAs & Fractional CFOs", desc: "Quantify the FY26 SBA Capital Exemption for your clients today. Generate institutional-grade advisory briefs with one click.", icon: Calculator },
+    { title: "POS Financing", persona: "B2B Equipment Vendors", desc: "Overcome sticker shock. Negotiate live on the factory floor and show buyers exactly how the SBA will cover their financing fees.", icon: Users },
+  ];
+
+  return (
+    <div className="space-y-12">
+      <div className="w-full flex justify-center">
+        <AdUnit className="w-full max-w-5xl h-[90px]" label="Leaderboard Placement (728x90)" />
+      </div>
+
+      {/* Hero Section */}
+      <section className="bg-slate-900 border border-slate-800 p-12 rounded-lg shadow-sm flex flex-col md:flex-row gap-12 items-center">
+        <div className="flex-1 text-left">
+          <div className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 text-white border border-slate-700 text-xs font-bold uppercase tracking-widest mb-8 rounded-lg">
+            Institutional Utility Platform
+          </div>
+          <h1 className="font-serif text-4xl lg:text-5xl font-bold text-white mb-6 leading-tight">
+            Structure SBA Deals. <br />Accelerate Underwriting.
+          </h1>
+          <p className="text-slate-300 text-lg mb-8 leading-relaxed max-w-2xl font-sans">
+            The free, data-dense financial utility for the commercial capital ecosystem. Instantly calculate fee exemptions, model amortization, screen federal eligibility, and generate client-ready term sheets.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-4">
+            <button onClick={() => nav('calculator')} className="px-6 py-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow-sm transition-colors flex items-center justify-center gap-2 text-base">
+              Launch Pricing Engine <ArrowRight className="w-5 h-5" />
+            </button>
+            <button onClick={() => nav('screener')} className="px-6 py-4 bg-white text-slate-900 font-bold hover:bg-slate-50 rounded-lg shadow-sm transition-colors text-base flex items-center justify-center">
+              Check Eligibility Engine
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* Ecosystem Use Cases (GTM Integration) */}
+      <section className="space-y-8">
+        <div className="border-b-2 border-slate-900 pb-4 mb-6">
+          <h2 className="font-serif text-2xl font-bold text-slate-900">Built for the Commercial Finance Ecosystem</h2>
+        </div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {GTM_AUDIENCES.map((audience, idx) => (
+            <div key={idx} className="bg-white border border-slate-200 rounded-lg p-8 shadow-sm flex flex-col hover:shadow-md transition-shadow">
+              <div className="bg-slate-50 w-12 h-12 rounded-lg border border-slate-200 flex items-center justify-center mb-6">
+                <audience.icon className="w-6 h-6 text-slate-900" />
+              </div>
+              <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-3">{audience.title}</div>
+              <h3 className="font-serif text-xl font-bold text-slate-900 mb-4">{audience.persona}</h3>
+              <p className="text-sm text-slate-600 leading-relaxed flex-1 font-sans">{audience.desc}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Main Content Grid */}
+      <div className="grid lg:grid-cols-3 gap-8">
+        
+        {/* Left Column: Data Table */}
+        <section className="lg:col-span-2 space-y-8">
+          <div>
+            <div className="flex items-center justify-between border-b-2 border-slate-900 pb-4 mb-6">
+              <h2 className="font-serif text-2xl font-bold text-slate-900">Current SBA Product Limits</h2>
+              <button onClick={() => nav('compare')} className="text-sm font-bold text-slate-900 hover:text-slate-600 transition-colors">View Full Matrix &rarr;</button>
+            </div>
+            
+            <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200">
+                    <th className="py-4 px-6 text-xs font-bold text-slate-600 uppercase tracking-wider">Program Classification</th>
+                    <th className="py-4 px-6 text-xs font-bold text-slate-600 uppercase tracking-wider text-right">Maximum Capital</th>
+                    <th className="py-4 px-6 text-xs font-bold text-slate-600 uppercase tracking-wider text-right">Base Rate Target</th>
+                  </tr>
+                </thead>
+                <tbody className="text-sm text-slate-800">
+                  <tr className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td className="py-4 px-6 font-medium">SBA 7(a) Real Estate</td>
+                    <td className="py-4 px-6 font-sans tabular-nums text-slate-900 font-bold text-right">$5,000,000</td>
+                    <td className="py-4 px-6 font-sans tabular-nums text-slate-600 text-right">Prime + 2.75%</td>
+                  </tr>
+                  <tr className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td className="py-4 px-6 font-medium">SBA 7(a) Working Capital</td>
+                    <td className="py-4 px-6 font-sans tabular-nums text-slate-900 font-bold text-right">$5,000,000</td>
+                    <td className="py-4 px-6 font-sans tabular-nums text-slate-600 text-right">Prime + 2.75%</td>
+                  </tr>
+                  <tr className="hover:bg-slate-50 transition-colors">
+                    <td className="py-4 px-6 font-medium">SBA Express</td>
+                    <td className="py-4 px-6 font-sans tabular-nums text-slate-900 font-bold text-right">$500,000</td>
+                    <td className="py-4 px-6 font-sans tabular-nums text-slate-600 text-right">Prime + 4.50%</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <AdUnit className="w-full h-32" label="In-Article Placement" />
+        </section>
+
+        {/* Sidebar Tools Menu */}
+        <section className="lg:col-span-1 space-y-8">
+          <div>
+            <div className="border-b-2 border-slate-900 pb-4 mb-6">
+              <h2 className="font-serif text-2xl font-bold text-slate-900">Platform Index</h2>
+            </div>
+            
+            <div className="grid gap-4">
+              {TOOLS.map((tool) => (
+                <button
+                  key={tool.id}
+                  onClick={() => nav(tool.id)}
+                  className="text-left group bg-white border border-slate-200 hover:border-slate-300 p-6 rounded-lg transition-colors shadow-sm flex gap-4 items-start"
+                >
+                  <div className="bg-slate-50 p-2 rounded-lg border border-slate-200 group-hover:bg-slate-900 transition-colors">
+                    <tool.icon className="w-5 h-5 text-slate-900 group-hover:text-white transition-colors" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-base mb-2">{tool.title}</h3>
+                    <p className="text-sm text-slate-600 leading-relaxed font-sans">{tool.desc}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <AdUnit className="w-full h-[250px]" label="Sidebar Placement (300x250)" />
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// PAGE: CALCULATOR & PITCH TERMINAL
+// ============================================================================
+function pmt(rate, nper, pv) {
+  if (rate === 0) return pv / nper;
+  return (rate * pv * Math.pow(1 + rate, nper)) / (Math.pow(1 + rate, nper) - 1);
+}
+
+function CalculatorPitch() {
+  const [amount, setAmount] = useState("450000");
+  const [rateStr, setRateStr] = useState("10.5");
+  const [years, setYears] = useState("10");
+  const [prog, setProg] = useState("7a_10");
+  
+  // Terminal State
+  const [rawNotes, setRawNotes] = useState("");
+  const [isParsingNotes, setIsParsingNotes] = useState(false);
+  const [businessScenario, setBusinessScenario] = useState("");
+  const [generatingPitch, setGeneratingPitch] = useState(false);
+  const [brokerEmail, setBrokerEmail] = useState("");
+  const [errorMsg, setErrorMsg] = useState(null);
+  const [copiedCell, setCopiedCell] = useState(null);
+  
+  // FY 2026 Waiver State
+  const [isManufacturer, setIsManufacturer] = useState(false);
+
+  // Calculations
+  const principal = parseFloat(amount.replace(/,/g, "")) || 0;
+  const annualRate = parseFloat(rateStr) / 100 || 0;
+  const n = parseInt(years) * 12;
+  const mr = annualRate / 12;
+  const monthly = useMemo(() => principal > 0 && n > 0 ? pmt(mr, n, principal) : 0, [principal, mr, n]);
+  
+  const totalRepaid = monthly * n;
+  const totalInterest = totalRepaid - principal;
+  const principalPct = totalRepaid > 0 ? (principal / totalRepaid) * 100 : 0;
+  const interestPct = totalRepaid > 0 ? (totalInterest / totalRepaid) * 100 : 0;
+
+  // High Finance: SBA Guaranty Fee Estimation Logic (Blended proxies for broker estimates)
+  const estimatedSBAFee = useMemo(() => {
+    if (prog.includes('7a')) return principal * 0.0275; // Blended 2.75% avg 7(a) fee
+    if (prog === '504') return principal * 0.025; // Blended 2.5% CDC/Participation fee
+    if (prog === 'express') return principal * 0.02; // Blended 2.0% Express fee
+    return principal * 0.025;
+  }, [principal, prog]);
+  
+  const finalSBAFee = isManufacturer ? 0 : estimatedSBAFee;
+  const feeSavings = estimatedSBAFee - finalSBAFee;
+
+  const fmt = (v) => v.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  const fmt2 = (v) => v.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const handleCopyCell = (text, id) => {
+    try {
+      // Bulletproof iframe fallback for copy-to-clipboard
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      // Prevent scrolling to bottom of page
+      textArea.style.top = "0";
+      textArea.style.left = "0";
+      textArea.style.position = "fixed";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      
+      setCopiedCell(id);
+      setTimeout(() => setCopiedCell(null), 1500);
+    } catch (err) {
+      console.error('Fallback: Oops, unable to copy', err);
+    }
+  };
+
+  const handleExportCSV = () => {
+    let csv = "Month,Payment,Principal,Interest,Balance\n";
+    let bal = principal;
+    for (let i = 1; i <= n; i++) {
+      const int = bal * mr;
+      const pri = monthly - int;
+      bal = Math.max(0, bal - pri);
+      csv += `${i},${monthly.toFixed(2)},${pri.toFixed(2)},${int.toFixed(2)},${bal.toFixed(2)}\n`;
+    }
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `Amortization_Schedule_${principal}.csv`;
+    link.click();
+  };
+
+  const handleCopyData = () => {
+    let tsv = "Month\tPayment\tPrincipal\tInterest\tBalance\n";
+    let bal = principal;
+    for (let i = 1; i <= n; i++) {
+      const int = bal * mr;
+      const pri = monthly - int;
+      bal = Math.max(0, bal - pri);
+      tsv += `${i}\t${monthly.toFixed(2)}\t${pri.toFixed(2)}\t${int.toFixed(2)}\t${bal.toFixed(2)}\n`;
+    }
+    
+    try {
+      // Bulletproof iframe fallback for bulk data copy
+      const textArea = document.createElement("textarea");
+      textArea.value = tsv;
+      textArea.style.top = "0";
+      textArea.style.left = "0";
+      textArea.style.position = "fixed";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      
+      setCopiedCell('all');
+      setTimeout(() => setCopiedCell(null), 2000);
+    } catch (err) {
+      console.error('Fallback: Oops, unable to copy', err);
+    }
+  };
+
+  const handleParseNotes = async () => {
+    if (!rawNotes.trim()) return;
+    setIsParsingNotes(true);
+    setErrorMsg(null);
+
+    const systemPrompt = "You are a commercial loan assistant executing a data extraction protocol. Extract parameters from the broker's notes. Return JSON only.";
+    const userPrompt = `Extract commercial loan parameters from the following unformatted text:
+    Notes: "${rawNotes}"`;
+
+    const schema = {
+      type: "OBJECT",
+      properties: {
+        amount: { type: "STRING", description: "Loan amount as a plain number string without commas or $, e.g. '500000'." },
+        program: { type: "STRING", description: "Exact match required: '7a_25', '7a_10', 'express', or '504'." },
+        years: { type: "STRING", description: "Term in years, integer string." },
+        assessment: { type: "STRING", description: "Formal 2-3 sentence strategic broker assessment." }
+      },
+      required: ["amount", "program", "years", "assessment"]
+    };
+
+    try {
+      const data = await fetchAutomatedContent(userPrompt, systemPrompt, schema);
+      if (data.amount) setAmount(Number(data.amount).toLocaleString());
+      if (data.program && PROGRAMS.some(p => p.id === data.program)) setProg(data.program);
+      if (data.years) setYears(data.years);
+      if (data.assessment) setBusinessScenario(data.assessment);
+    } catch (err) {
+      setErrorMsg(err.message);
+    } finally {
+      setIsParsingNotes(false);
+    }
+  };
+
+  const handleGeneratePitch = async () => {
+    setGeneratingPitch(true);
+    setErrorMsg(null);
+    
+    const systemPrompt = "You are executing a document generation protocol for a commercial bank. Output ONLY raw HTML. No markdown code blocks. Strict CSS adherence.";
+    const userPrompt = `Generate a highly structured, formal Executive Summary and Term Sheet.
+    
+    Parameters:
+    Program: ${PROGRAMS.find(p=>p.id===prog)?.label}
+    Principal: $${amount}
+    Rate: ${rateStr}%
+    Term: ${years} years
+    Calculated Debt Service: ${fmt2(monthly)}
+    Estimated Standard SBA Fee: ${fmt(estimatedSBAFee)}
+    FY26 NAICS 31-33 Waiver Applied: ${isManufacturer ? 'YES (Fee Reduced to $0)' : 'NO'}
+    Upfront Capital Saved: ${fmt(feeSavings)}
+    Officer Email: ${brokerEmail || '[Draft Document]'}
+    Strategic Analysis: ${businessScenario || 'Standard commercial expansion.'}
+    
+    Requirements:
+    - Aesthetics: Institutional navy (#0A2540) and clinical white.
+    - Grid: Strict 8px/16px padding logic. Tabular presentation for numbers.
+    - Content: If the FY26 Waiver is applied, create a "Legislative Advantages" section highlighting the September 30, 2026 deadline to create urgency.
+    - Footer: "Generated via ClearPath SBA Structuring Terminal | Not a commitment to lend | Officer: ${brokerEmail || 'Draft'}".
+    - Output MUST be plain HTML string.`;
+
+    try {
+      let htmlText = await fetchAutomatedContent(userPrompt, systemPrompt);
+      htmlText = htmlText.replace(/^```html\s*/i, '').replace(/```\s*$/i, '');
+
+      const win = window.open('', '_blank');
+      if (win) {
+        win.document.write(htmlText);
+        win.document.close();
+        win.focus();
+        setTimeout(() => win.print(), 1000);
+      } else {
+        throw new Error("Pop-up disabled. Please allow pop-ups for this domain to generate PDFs.");
+      }
+    } catch (err) {
+      setErrorMsg(err.message);
+    } finally {
+      setGeneratingPitch(false);
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <AdUnit className="w-full h-[90px]" label="Top Banner Placement" />
+
+      <div className="border-b-2 border-slate-900 pb-4 mb-8">
+        <h1 className="font-serif text-3xl font-bold text-slate-900 mb-2 uppercase tracking-wider">Pricing & Structuring Terminal</h1>
+        <p className="text-slate-600 text-sm max-w-2xl font-sans">
+          Structure loan scenarios, review amortization schedules, and generate formal proposal memorandums.
+        </p>
+      </div>
+
+      {errorMsg && (
+        <div className="bg-white border border-red-200 text-red-700 px-6 py-4 rounded-lg flex items-start gap-4 shadow-sm">
+          <AlertCircle className="w-5 h-5 shrink-0" />
+          <p className="text-sm font-medium leading-snug">{errorMsg}</p>
+        </div>
+      )}
+
+      <div className="grid lg:grid-cols-12 gap-8">
+        {/* Left Column: Inputs & Context */}
+        <div className="lg:col-span-5 flex flex-col gap-8">
+          
+          <div className="bg-white border border-slate-200 rounded-lg p-8 shadow-sm transition-all hover:shadow-md">
+            <h2 className="font-serif text-sm font-bold text-slate-900 uppercase tracking-widest mb-4 flex items-center gap-2">
+              <FileText className="w-4 h-4 text-slate-500" /> NLP Parameter Extraction
+            </h2>
+            <p className="text-sm text-slate-600 mb-6 leading-relaxed font-sans">
+              Input unstructured client correspondence. The system will extract parameters to populate the structuring matrix.
+            </p>
+            <textarea
+              value={rawNotes}
+              onChange={(e) => setRawNotes(e.target.value)}
+              placeholder="e.g., 'Client requests $250,000 for equipment acquisition. Targeting a 10-year repayment schedule.'"
+              className="w-full h-28 bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 outline-none resize-none mb-6 transition-all shadow-inner"
+            />
+            <button
+              onClick={handleParseNotes}
+              disabled={isParsingNotes || !rawNotes.trim()}
+              className="w-full flex items-center justify-center gap-2 bg-slate-50 hover:bg-slate-100 disabled:opacity-50 text-slate-900 border border-slate-200 font-bold py-3.5 px-4 rounded-lg transition-colors text-sm shadow-sm"
+            >
+              {isParsingNotes ? <Loader2 className="w-4 h-4 animate-spin text-slate-500" /> : null}
+              {isParsingNotes ? 'Processing data...' : 'Extract Parameters'}
+            </button>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-lg p-8 shadow-sm transition-all hover:shadow-md">
+            <h2 className="font-serif text-sm font-bold text-slate-900 uppercase tracking-widest mb-6 border-b border-slate-100 pb-4">Structuring Matrix</h2>
+            
+            <div className="space-y-6">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Program Selection</label>
+                <select
+                  value={prog}
+                  onChange={e => {
+                    setProg(e.target.value);
+                    const p = PROGRAMS.find(p => p.id === e.target.value);
+                    if (p && parseInt(years) > p.maxY) setYears(String(p.maxY));
+                  }}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 outline-none transition-all shadow-sm"
+                >
+                  {PROGRAMS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Requested Capital</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 font-bold">$</span>
+                  <input
+                    type="text"
+                    value={Number(amount.replace(/,/g, "")).toLocaleString()}
+                    onChange={e => setAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-4 py-3 text-lg font-sans tabular-nums text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 outline-none transition-all shadow-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-6">
+                <div>
+                  <div className="flex justify-between items-center mb-3">
+                    <label className="text-xs font-bold text-slate-600 uppercase tracking-widest">Base Rate</label>
+                    <span className="text-slate-900 font-bold font-sans tabular-nums bg-slate-100 border border-slate-200 px-3 py-1 rounded shadow-sm text-sm">{rateStr}%</span>
+                  </div>
+                  <input
+                    type="range" min="4" max="20" step="0.25"
+                    value={rateStr}
+                    onChange={e => setRateStr(e.target.value)}
+                    className="w-full"
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-3">
+                    <label className="text-xs font-bold text-slate-600 uppercase tracking-widest">Term Limit</label>
+                    <span className="text-slate-900 font-bold font-sans tabular-nums bg-slate-100 border border-slate-200 px-3 py-1 rounded shadow-sm text-sm">{years} yrs</span>
+                  </div>
+                  <input
+                    type="range" min="1" max={PROGRAMS.find(p => p.id === prog)?.maxY || 25}
+                    value={years}
+                    onChange={e => setYears(e.target.value)}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+
+              {/* High Finance Addition: FY26 Waiver Toggle */}
+              <div className="mt-8 pt-6 border-t border-slate-200">
+                <label className="flex items-start gap-4 cursor-pointer group">
+                  <div className={`relative flex items-center justify-center w-5 h-5 mt-0.5 border-2 rounded transition-colors ${isManufacturer ? 'bg-slate-900 border-slate-900' : 'bg-slate-50 border-slate-300 group-hover:border-slate-400'}`}>
+                    <input type="checkbox" className="sr-only" checked={isManufacturer} onChange={(e) => setIsManufacturer(e.target.checked)} />
+                    {isManufacturer && <Check className="w-3 h-3 text-white" />}
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-slate-900 uppercase tracking-widest">Apply FY26 Manufacturer Waiver</div>
+                    <div className="text-sm text-slate-500 mt-1 leading-relaxed font-sans">
+                      Eliminates upfront SBA guaranty fees for NAICS 31-33 entities. <span className="font-semibold text-slate-700">Expires Sep 30, 2026.</span>
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-lg p-8 shadow-sm transition-all hover:shadow-md">
+            <h2 className="font-serif text-sm font-bold text-slate-900 uppercase tracking-widest mb-4 border-b border-slate-100 pb-4">Executive Summary & Term Sheet</h2>
+            <textarea
+              value={businessScenario}
+              onChange={(e) => setBusinessScenario(e.target.value)}
+              placeholder="Enter strategic underwriting narrative..."
+              className="w-full h-28 bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 outline-none resize-none mb-6 transition-all shadow-inner"
+            />
+            
+            <div className="mb-8">
+              <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Originating Officer Email</label>
+              <input 
+                type="email" 
+                value={brokerEmail}
+                onChange={e => setBrokerEmail(e.target.value)}
+                placeholder="officer@institution.com"
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 outline-none transition-all shadow-sm"
+              />
+            </div>
+
+            <button
+              onClick={handleGeneratePitch}
+              disabled={generatingPitch}
+              className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold py-4 px-6 rounded-lg transition-colors shadow-sm text-sm"
+            >
+              {generatingPitch ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileText className="w-5 h-5" />}
+              {generatingPitch ? 'Processing document...' : 'Execute Official Proposal'}
+            </button>
+          </div>
+          
+          <AdUnit className="w-full h-[250px]" label="Sidebar Ad Unit" />
+        </div>
+
+        {/* Right Column: Output & Amortization */}
+        <div className="lg:col-span-7 flex flex-col gap-8">
+          
+          <div className="bg-slate-900 rounded-xl p-10 shadow-lg relative overflow-hidden flex flex-col justify-between border border-slate-800">
+             {/* Decorative subtle glow */}
+             <div className="absolute -top-24 -right-24 w-64 h-64 bg-slate-800 rounded-full blur-3xl pointer-events-none opacity-50"></div>
+
+             <div className="relative z-10">
+               <div className="flex justify-between items-start mb-4">
+                 <div className="text-xs text-slate-400 font-bold uppercase tracking-widest">Calculated Monthly Debt Service</div>
+                 {isManufacturer && (
+                   <div className="bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5">
+                     <CheckCircle2 className="w-3 h-3" /> FY26 Waiver Active
+                   </div>
+                 )}
+               </div>
+               <div className="text-6xl font-bold text-white font-sans tabular-nums tracking-tight mb-4">
+                 {fmt2(monthly)}
+               </div>
+               <div className="text-sm text-slate-400 font-medium border-b border-slate-800 pb-8 mb-8">
+                 {years} Year Term &middot; {n} Total Payments &middot; <span className="font-sans tabular-nums">{rateStr}%</span> Interest
+               </div>
+
+               <div className="grid grid-cols-2 gap-6 mb-10">
+                  <div className="bg-slate-800/50 p-6 rounded-xl border border-slate-700/50 backdrop-blur-sm">
+                    <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-2">Total Interest</div>
+                    <div className="text-2xl font-semibold text-white font-sans tabular-nums tracking-tight">{fmt(totalInterest)}</div>
+                  </div>
+                  <div className="bg-slate-800/50 p-6 rounded-xl border border-slate-700/50 backdrop-blur-sm relative overflow-hidden">
+                    <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-2">Upfront Guaranty Fee</div>
+                    <div className="flex items-end gap-3">
+                      <div className={`text-2xl font-semibold font-sans tabular-nums tracking-tight ${isManufacturer ? 'text-emerald-400' : 'text-white'}`}>
+                        {fmt(finalSBAFee)}
+                      </div>
+                      {isManufacturer && (
+                        <div className="text-sm text-slate-500 line-through font-sans tabular-nums pb-1">
+                          {fmt(estimatedSBAFee)}
+                        </div>
+                      )}
+                    </div>
+                    {isManufacturer && (
+                      <div className="absolute bottom-0 left-0 w-full h-1 bg-emerald-500"></div>
+                    )}
+                  </div>
+               </div>
+
+               {/* Principal vs Interest Composition Bar */}
+               <div>
+                 <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest mb-3">
+                   <span className="text-white">Principal ({principalPct.toFixed(0)}%)</span>
+                   <span className="text-slate-400">Interest ({interestPct.toFixed(0)}%)</span>
+                 </div>
+                 <div className="w-full h-2 rounded-full flex overflow-hidden bg-slate-800">
+                   <div className="bg-emerald-500 h-full transition-all duration-700 ease-out" style={{ width: `${principalPct}%` }}></div>
+                   <div className="bg-slate-600 h-full transition-all duration-700 ease-out" style={{ width: `${interestPct}%` }}></div>
+                 </div>
+               </div>
+             </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden flex flex-col">
+             <div className="bg-slate-50 border-b border-slate-200 px-8 py-6 flex flex-wrap justify-between items-center gap-4 z-20">
+               <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                 <Clock className="w-5 h-5 text-slate-500" /> Amortization Schedule
+               </h3>
+               <div className="flex items-center gap-3">
+                 <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest bg-white px-3 py-1.5 rounded border border-slate-200 hidden sm:inline-block shadow-sm">First 12 Months Preview</span>
+                 <button 
+                   onClick={handleCopyData}
+                   className="text-xs font-bold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 hover:border-slate-400 px-4 py-2 rounded-lg transition-all flex items-center gap-2 shadow-sm"
+                 >
+                   {copiedCell === 'all' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-slate-500" />}
+                   {copiedCell === 'all' ? 'Copied Data' : 'Copy Data'}
+                 </button>
+                 <button 
+                   onClick={handleExportCSV}
+                   className="text-xs font-bold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 hover:border-slate-400 px-4 py-2 rounded-lg transition-all flex items-center gap-2 shadow-sm"
+                 >
+                   <Download className="w-3.5 h-3.5 text-slate-500" /> Export to Excel
+                 </button>
+               </div>
+             </div>
+             
+             {/* UX Fix: Max-height with independent scrolling and sticky headers */}
+             <div className="overflow-x-auto overflow-y-auto max-h-[500px] relative bg-white scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-slate-50">
+               <table className="w-full text-left border-collapse relative min-w-[700px]">
+                 <caption className="sr-only">
+                   Commercial SBA 7a and 504 Loan Amortization Schedule Calculator featuring FY26 NAICS 31-33 Manufacturer Fee Waiver savings.
+                 </caption>
+                 <thead className="bg-slate-100 sticky top-0 z-30 shadow-[0_1px_0_0_#cbd5e1]">
+                   <tr>
+                     {/* UX Fix: Sticky corner cell (Top + Left) */}
+                     <th className="py-4 px-8 text-xs font-bold text-slate-700 uppercase tracking-widest sticky left-0 bg-slate-100 z-40 shadow-[1px_0_0_0_#cbd5e1] w-24">Mo.</th>
+                     <th className="py-4 px-8 text-xs font-bold text-slate-700 uppercase tracking-widest text-right bg-slate-100">Payment</th>
+                     <th className="py-4 px-8 text-xs font-bold text-slate-700 uppercase tracking-widest text-right bg-slate-100">Principal</th>
+                     <th className="py-4 px-8 text-xs font-bold text-slate-700 uppercase tracking-widest text-right bg-slate-100">Interest</th>
+                     <th className="py-4 px-8 text-xs font-bold text-slate-700 uppercase tracking-widest text-right bg-slate-100">Balance</th>
+                   </tr>
+                 </thead>
+                 <tbody className="text-sm font-sans tabular-nums text-slate-700">
+                   {Array.from({ length: Math.min(n, 12) }).reduce((acc, _, i) => {
+                     const lastBal = i === 0 ? principal : acc.data[i-1].bal;
+                     const int = lastBal * mr;
+                     const pri = monthly - int;
+                     const bal = Math.max(0, lastBal - pri);
+                     acc.data.push({ m: i + 1, pay: monthly, pri, int, bal });
+                     return acc;
+                   }, { data: [] }).data.map((r, index) => (
+                     <React.Fragment key={r.m}>
+                       {/* Monetization: Native In-Feed Ad placement perfectly slotted between rows */}
+                       {index === 6 && (
+                         <tr>
+                           <td colSpan="5" className="p-0 border-b border-slate-200 bg-slate-100/50 relative z-0">
+                             <AdUnit className="w-full h-[90px] border-y border-slate-200 rounded-none bg-transparent" label="Native In-Feed Advertisement (High CPC/RPM Target)" />
+                           </td>
+                         </tr>
+                       )}
+                       <tr className={`border-b border-slate-100 hover:bg-slate-100/80 transition-colors group ${index % 2 !== 0 ? 'bg-slate-50/40' : 'bg-white'}`}>
+                         
+                         {/* UX Fix: Sticky First Column */}
+                         <td className={`py-5 px-8 font-bold text-slate-900 sticky left-0 z-10 shadow-[1px_0_0_0_#e2e8f0] transition-colors group-hover:bg-slate-100/90 ${index % 2 !== 0 ? 'bg-slate-50/95' : 'bg-white/95'}`}>
+                           {r.m}
+                         </td>
+                         
+                         <td 
+                           onClick={() => handleCopyCell(fmt2(r.pay), `pay-${r.m}`)}
+                           className="py-5 px-8 bg-slate-50/30 text-slate-900 font-semibold text-right cursor-pointer hover:bg-slate-200/50 transition-colors group/cell relative pl-14"
+                           title="Copy Payment"
+                         >
+                           <span className="absolute left-6 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-100 transition-opacity">
+                             {copiedCell === `pay-${r.m}` ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-400 hover:text-slate-600" />}
+                           </span>
+                           {fmt2(r.pay)}
+                         </td>
+
+                         <td 
+                           onClick={() => handleCopyCell(fmt2(r.pri), `pri-${r.m}`)}
+                           className="py-5 px-8 text-slate-900 text-right font-medium cursor-pointer hover:bg-slate-200/50 transition-colors group/cell relative pl-14"
+                           title="Copy Principal"
+                         >
+                           <span className="absolute left-6 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-100 transition-opacity">
+                             {copiedCell === `pri-${r.m}` ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-400 hover:text-slate-600" />}
+                           </span>
+                           {fmt2(r.pri)}
+                         </td>
+
+                         <td 
+                           onClick={() => handleCopyCell(fmt2(r.int), `int-${r.m}`)}
+                           className="py-5 px-8 text-slate-500 text-right cursor-pointer hover:bg-slate-200/50 transition-colors group/cell relative pl-14"
+                           title="Copy Interest"
+                         >
+                           <span className="absolute left-6 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-100 transition-opacity">
+                             {copiedCell === `int-${r.m}` ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-400 hover:text-slate-600" />}
+                           </span>
+                           {fmt2(r.int)}
+                         </td>
+
+                         <td 
+                           onClick={() => handleCopyCell(fmt2(r.bal), `bal-${r.m}`)}
+                           className="py-5 px-8 text-right font-medium text-slate-900 cursor-pointer hover:bg-slate-200/50 transition-colors group/cell relative pl-14"
+                           title="Copy Balance"
+                         >
+                           <span className="absolute left-6 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-100 transition-opacity">
+                             {copiedCell === `bal-${r.m}` ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-400 hover:text-slate-600" />}
+                           </span>
+                           {fmt2(r.bal)}
+                         </td>
+                       </tr>
+                     </React.Fragment>
+                   ))}
+                 </tbody>
+                 <tfoot className="bg-slate-50 border-t-2 border-slate-200 sticky bottom-0 z-20 shadow-[0_-1px_0_0_#e2e8f0]">
+                   <tr>
+                     <td colSpan="5" className="py-5 px-8 text-center bg-slate-50">
+                       <div className="text-xs uppercase tracking-widest font-bold text-slate-500">
+                         Showing First 12 Months. Export for full {n}-month schedule.
+                       </div>
+                     </td>
+                   </tr>
+                 </tfoot>
+               </table>
+             </div>
+          </div>
+          
+          <AdUnit className="w-full h-[90px]" label="Bottom Placement" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// PAGE: SCREENER
+// ============================================================================
+function Screener() {
+  const [current, setCurrent] = useState(0);
+  const [answers, setAnswers] = useState({});
+  const [result, setResult] = useState(null);
+  const [selected, setSelected] = useState("");
+
+  const q = SCREENER_QUESTIONS[current];
+  const progress = (current / SCREENER_QUESTIONS.length) * 100;
+
+  const handleNext = () => {
+    if (!selected) return;
+    const newAnswers = { ...answers, [q.id]: selected };
+    setAnswers(newAnswers);
+    setSelected("");
+    if (current + 1 >= SCREENER_QUESTIONS.length) {
+      let reds = 0, yellows = 0;
+      SCREENER_QUESTIONS.forEach(question => {
+        const opt = question.options.find(o => o.value === newAnswers[question.id]);
+        if (opt?.flag === 'red') reds++;
+        if (opt?.flag === 'yellow') yellows++;
+      });
+      setResult(reds === 0 && yellows === 0 ? 'likely' : reds > 0 ? 'disqualified' : 'conditional');
+    } else {
+      setCurrent(c => c + 1);
+    }
+  };
+
+  const restart = () => { setCurrent(0); setAnswers({}); setSelected(""); setResult(null); };
+
+  if (result) {
+    const isGood = result === 'likely';
+    return (
+      <div className="max-w-2xl mx-auto space-y-8">
+        <AdUnit className="w-full h-24" label="Top Ad Placement" />
+        
+        <div className="bg-white border border-slate-200 rounded-lg p-12 shadow-sm text-center">
+          <div className={`w-16 h-16 mx-auto rounded-full flex items-center justify-center mb-8 border ${isGood ? 'bg-slate-50 border-emerald-600 text-emerald-600' : 'bg-slate-50 border-red-600 text-red-600'}`}>
+            {isGood ? <CheckCircle2 className="w-8 h-8" /> : <AlertCircle className="w-8 h-8" />}
+          </div>
+          <h2 className="font-serif text-3xl font-bold text-slate-900 mb-6">
+            {isGood ? "Eligibility Verified" : "Procedural Hard Stop Identified"}
+          </h2>
+          <p className="text-slate-600 mb-12 text-base leading-relaxed font-sans max-w-lg mx-auto">
+            {isGood 
+              ? "This application parameters satisfy foundational SBA 50 10 7 credit requirements. You may proceed to structuring and full document collection." 
+              : "This file contains criteria that violate standard SBA operating procedures. Consider alternative commercial financing."}
+          </p>
+          <button onClick={restart} className="text-sm font-bold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 px-8 py-4 rounded-lg transition-colors shadow-sm">
+            Process New Inquiry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-8">
+      <AdUnit className="w-full h-24" label="Top Ad Placement" />
+
+      <div>
+        <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">
+          <span>Eligibility Engine</span>
+          <span>Phase {current + 1} of {SCREENER_QUESTIONS.length}</span>
+        </div>
+        <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+          <div className="bg-slate-900 h-full transition-all duration-500 ease-out" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-lg p-12 shadow-sm">
+        <h2 className="font-serif text-2xl font-bold text-slate-900 mb-8 leading-snug">{q.q}</h2>
+        {q.hint && (
+          <div className="flex gap-4 bg-slate-50 border border-slate-200 p-4 mb-8 text-sm text-slate-600 font-medium rounded-lg items-start">
+            <Info className="w-5 h-5 text-slate-400 shrink-0" />
+            <p>{q.hint}</p>
+          </div>
+        )}
+
+        <div className="border border-slate-200 rounded-lg overflow-hidden mb-8">
+          {q.options.map((opt, idx) => (
+            <button
+              key={opt.value}
+              onClick={() => setSelected(opt.value)}
+              className={`w-full text-left px-6 py-5 border-b border-slate-200 last:border-0 transition-colors flex items-center gap-4 text-base font-medium
+                ${selected === opt.value
+                  ? "bg-slate-50 text-slate-900"
+                  : "bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+            >
+              <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${selected === opt.value ? 'border-slate-900' : 'border-slate-300'}`}>
+                {selected === opt.value && <div className="w-2 h-2 rounded-full bg-slate-900" />}
+              </div>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex justify-between items-center pt-8 border-t border-slate-200">
+          <button
+            onClick={() => { if (current > 0) { setCurrent(c => c - 1); setSelected(answers[SCREENER_QUESTIONS[current - 1].id] || ""); } }}
+            disabled={current === 0}
+            className="text-sm font-bold text-slate-500 hover:text-slate-900 disabled:opacity-0 transition-colors px-4 py-2"
+          >
+            Previous
+          </button>
+          <button
+            onClick={handleNext}
+            disabled={!selected}
+            className="bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 font-bold px-8 py-4 rounded-lg transition-colors flex items-center gap-2 shadow-sm text-sm"
+          >
+            {current + 1 === SCREENER_QUESTIONS.length ? "Analyze Matrix" : "Continue Process"}
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+      
+      <AdUnit className="w-full h-24" label="Bottom Ad Placement" />
+    </div>
+  );
+}
+
+// ============================================================================
+// PAGE: CHECKLIST (WITH AI EXPLAINER)
+// ============================================================================
+function Checklist() {
+  const [loanType, setLoanType] = useState("");
+  const [entity, setEntity] = useState("");
+  
+  // AI Explainer State
+  const [explainingItem, setExplainingItem] = useState(null);
+  const [explanationText, setExplanationText] = useState("");
+  const [isExplaining, setIsExplaining] = useState(false);
+  
+  // Interaction State: Make checklist functional
+  const [checkedItems, setCheckedItems] = useState(new Set());
+
+  const items = (loanType && entity) ? [
+    "SBA Form 1919 — Borrower Information Form",
+    "SBA Form 413 — Personal Financial Statement",
+    "3 years federal business tax returns",
+    "YTD Profit & Loss and Balance Sheet",
+    "Business debt schedule",
+    "Government-issued photo ID",
+    entity === "LLC" ? "Operating Agreement" : "Articles of Incorporation",
+    loanType === "real_estate" ? "Commercial Real Estate Purchase Contract" : "Detailed Use of Proceeds"
+  ] : [];
+
+  const handleExplain = async (item) => {
+    setExplainingItem(item);
+    setIsExplaining(true);
+    setExplanationText("");
+    
+    try {
+      const prompt = `Explain to a commercial borrower why the SBA requires the following document for underwriting: "${item}". Keep the explanation formal, strictly factual, concise, and under 3 sentences.`;
+      const result = await fetchAutomatedContent(prompt, "You are a formal commercial banking system.");
+      setExplanationText(result);
+    } catch (err) {
+      setExplanationText("System currently unable to retrieve definition. Consult standard SBA operational guidelines.");
+    } finally {
+      setIsExplaining(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-8">
+      <AdUnit className="w-full h-[90px]" label="Top AdSpace" />
+
+      <div className="border-b-2 border-slate-900 pb-4 mb-8">
+        <h1 className="font-serif text-2xl font-bold text-slate-900 mb-2">Compliance & Document Matrix</h1>
+        <p className="text-slate-600 text-sm font-sans">Generate legally-precise document requirements based on transaction architecture.</p>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-8 bg-white border border-slate-200 rounded-lg p-8 shadow-sm">
+        <div>
+          <label className="block text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-2">Transaction Classification</label>
+          <select value={loanType} onChange={e => {setLoanType(e.target.value); setExplainingItem(null); setCheckedItems(new Set());}} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none">
+            <option value="">Select Deal Type...</option>
+            <option value="working_capital">Working Capital / Equipment</option>
+            <option value="real_estate">Commercial Real Estate</option>
+            <option value="acquisition">Business Acquisition</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-2">Corporate Structure</label>
+          <select value={entity} onChange={e => {setEntity(e.target.value); setExplainingItem(null); setCheckedItems(new Set());}} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 text-sm text-slate-900 focus:bg-white focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none">
+            <option value="">Select Entity...</option>
+            <option value="LLC">LLC</option>
+            <option value="Corp">S-Corp / C-Corp</option>
+            <option value="SoleProp">Sole Proprietor</option>
+          </select>
+        </div>
+      </div>
+
+      {items.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+          <div className="bg-slate-50 border-b border-slate-200 px-8 py-6 flex justify-between items-center">
+            <h3 className="font-serif text-[11px] font-bold text-slate-900 uppercase tracking-widest">Required Submissions</h3>
+            <button onClick={()=>window.print()} className="text-[10px] font-bold text-slate-900 border border-slate-300 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 transition-colors flex items-center gap-1.5 shadow-sm uppercase tracking-widest">
+              <Download className="w-3.5 h-3.5" /> Export Matrix
+            </button>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {items.map((item, i) => (
+              <div key={i} className="flex flex-col">
+                <div 
+                  onClick={() => {
+                    const next = new Set(checkedItems);
+                    next.has(item) ? next.delete(item) : next.add(item);
+                    setCheckedItems(next);
+                  }}
+                  className="px-8 py-6 flex items-center justify-between hover:bg-slate-50 transition-colors group cursor-pointer"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className={`w-5 h-5 rounded-sm border flex items-center justify-center flex-shrink-0 transition-colors ${checkedItems.has(item) ? 'bg-slate-900 border-slate-900' : 'bg-white border-slate-300 group-hover:border-slate-400'}`}>
+                      {checkedItems.has(item) && <Check className="w-3.5 h-3.5 text-white" />}
+                    </div>
+                    <span className={`text-sm font-medium transition-all font-sans ${checkedItems.has(item) ? 'text-slate-400 line-through' : 'text-slate-800'}`}>{item}</span>
+                  </div>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); handleExplain(item); }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] uppercase tracking-widest font-bold text-slate-600 bg-white border border-slate-200 hover:border-slate-400 hover:text-slate-900 px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow-sm"
+                  >
+                    <MessageSquare className="w-3 h-3" /> Definition
+                  </button>
+                </div>
+                
+                {/* Explainer Block */}
+                {explainingItem === item && (
+                  <div className="px-16 py-6 bg-slate-50 border-t border-slate-100 text-sm">
+                    {isExplaining ? (
+                      <div className="flex items-center gap-3 text-slate-500 font-medium">
+                        <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                        Processing federal definition...
+                      </div>
+                    ) : (
+                      <div className="text-slate-700 leading-relaxed text-sm bg-white p-6 border border-slate-200 rounded-lg shadow-sm font-sans">
+                        {explanationText}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      
+      <AdUnit className="w-full h-[90px]" label="Bottom Placement" />
+    </div>
+  );
+}
+
+// ============================================================================
+// PAGE: COMPARE (SBA Product Matrix)
+// ============================================================================
+function Compare() {
+  return (
+    <div className="space-y-8">
+      <AdUnit className="w-full h-24" label="Top Ad Placement" />
+
+      <div className="border-b-2 border-slate-900 pb-4 mb-8">
+        <h1 className="font-serif text-3xl font-bold text-slate-900 mb-2">SBA Program Matrix</h1>
+        <p className="text-slate-600 text-sm font-sans">Institutional data table comparison of primary federal lending products.</p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-x-auto">
+        <table className="w-full text-left border-collapse min-w-[800px]">
+          <thead>
+            <tr className="bg-slate-50 border-b-2 border-slate-900">
+              <th className="py-6 px-8 text-[11px] font-bold text-slate-500 uppercase tracking-widest border-r border-slate-200 w-48">Parameter</th>
+              <th className="py-6 px-8 border-r border-slate-200 bg-white">
+                <div className="text-slate-900 font-bold text-lg mb-1 font-serif">SBA 7(a)</div>
+                <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">General Purpose</div>
+              </th>
+              <th className="py-6 px-8 border-r border-slate-200 bg-white">
+                <div className="text-slate-900 font-bold text-lg mb-1 font-serif">SBA 504</div>
+                <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Real Estate Focus</div>
+              </th>
+              <th className="py-6 px-8 bg-white">
+                <div className="text-slate-900 font-bold text-lg mb-1 font-serif">SBA Express</div>
+                <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Accelerated Processing</div>
+              </th>
+            </tr>
+          </thead>
+          <tbody className="text-sm text-slate-800">
+            {[
+              ["Max Capitalization", "$5,000,000", "$5,500,000", "$500,000"],
+              ["Interest Rate Base", "Variable (Prime + 2.75%)", "Fixed (CDC Portion)", "Variable (Prime + 4.50%)"],
+              ["Maximum Term", "25 yrs (RE) / 10 yrs (WC)", "20 yrs (RE only)", "10 yrs"],
+              ["Required Equity", "10-20%", "10-15%", "Lender Discretion"],
+              ["Optimal Use Case", "Acquisitions, general WC", "Owner-occupied buildings", "Lines of credit, quick cash"],
+            ].map((row, i) => (
+              <tr key={i} className="border-b border-slate-200 hover:bg-slate-50 transition-colors">
+                <td className="py-5 px-8 font-medium text-slate-900 border-r border-slate-200 bg-slate-50/50">{row[0]}</td>
+                <td className="py-5 px-8 border-r border-slate-200 font-sans tabular-nums text-slate-600">{row[1]}</td>
+                <td className="py-5 px-8 border-r border-slate-200 font-sans tabular-nums text-slate-600">{row[2]}</td>
+                <td className="py-5 px-8 font-sans tabular-nums text-slate-600">{row[3]}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      
+      <div className="grid md:grid-cols-2 gap-8 mt-12">
+        <AdUnit className="w-full h-64" label="Bottom Left Block (300x250)" />
+        <AdUnit className="w-full h-64" label="Bottom Right Block (300x250)" />
+      </div>
+    </div>
+  );
+}
